@@ -1,0 +1,220 @@
+---
+title: "Predicting Brazilian Rent Prices"
+author: "James Lipko"
+date: "3/30/2020"
+output: html_document
+---
+
+# Predicting Brazilian Rent Prices  
+## An application of multiple linear regression and artificial neural networks  
+
+### Loading the data  
+The data used in this project is downloaded from Kaggle. You can find the data [here](https://www.kaggle.com/rubenssjr/brasilian-houses-to-rent/version/2). 
+
+```{r}
+library(readxl)
+df <- read_xlsx('rent_brazil.xlsx')
+df.copy <- df
+head(df)
+```
+
+### Data Cleaning  
+By calling head on this imported dataframe we observe 14 columns with 13 variables. The first column is an ID column vector that has no impact on the rent amount, therefore we will omit it. We can also omit the column vectors 'hoa', 'property tax', 'fire insurance' and 'total' as these variables represent the additional payments to rent that make up the total cost and do not predict rent, the target variable. 
+
+```{r}
+#We do this by passing through a vector of the columns that we wish to omit preceded by a minus sign. 
+df <- df[,-c(1, 10, 12:14)]
+head(df)
+
+```
+
+We now have the variables that we need, they are not the correct data types; we must clean these up. To get a better idea of the issues, we call structure. 
+
+```{r}
+str(df)
+
+```
+
+First we will change categorical variables into factors. 
+
+```{r}
+df$city <- as.numeric(factor(df$city, levels = c(0,1), labels = c(1:2)))
+df$animal <- as.numeric(factor(df$animal, levels = c("acept", "not acept"), labels = c(1:2)))
+df$furniture <- as.numeric(factor(df$furniture, levels = c("furnished", "not furnished"), labels = c(1:2)))
+
+head(df)
+```
+
+
+Now we must address the floor variable. No other information is provided with the variable from the dataset owner. We have a few options with what to do with the entries that have - in them instead of a number. We can:
+  1. Omit the entries
+  2. Replace entries with the mean of the other values. 
+  3. Replace the entries with the median if the other values. 
+  
+Let's see how many entries do not have full information. 
+
+```{r}
+library(dplyr)
+df$floor <- na_if(df$floor, "-")
+sum(is.na(df$floor))/length(df$floor)
+df_all <- df
+```
+
+There are 1,555 or 25% of enteries with null values in our floor variable. This is not a negliable number. Replacing that many values with an average will skew and lessen the explanatory power of that variable. I am making the decision to omit the enteries without a floor assigned to them to understand the impact that floor has on rent in Brazil. If we find that floor does not have significant explanatory power, I will omit the variable in our regression and run the regression with all of the data points. 
+
+```{r}
+df <- na.omit(df)
+df$floor <- as.numeric(df$floor)
+
+df_all$floor <- as.numeric(df_all$floor)
+
+str(df)
+```
+
+We now observe that the dataframe has 4525 entries, or 6080 of the original enteries minus the 1555 enteries that had NA values in the floor variable. 
+
+Lastly, we clean 'rent amount'.
+
+```{r}
+df$`rent amount` <- sub(',','', df$`rent amount`)
+df$`rent amount` <- sub('R','', df$`rent amount`)
+df$`rent amount` <-as.numeric(gsub("\\$", "", df$`rent amount`))
+
+df_all$`rent amount` <- sub(',','', df_all$`rent amount`)
+df_all$`rent amount` <- sub('R','', df_all$`rent amount`)
+df_all$`rent amount` <-as.numeric(gsub("\\$", "", df_all$`rent amount`))
+
+str(df)
+
+```
+
+Data cleaning is complete. 
+
+
+### Exploratory data analysis
+
+I am interested on the correlation between all of the features here and wish to view a summary of how they are all related. A corrplot will do fine. 
+
+```{r}
+library(corrplot)
+M <- cor(df)
+corrplot(M, method = "circle")
+
+```
+
+
+Some rther interesting correlations. More analysis needed. I want to know the distributions of a few of these variables, specifically parking spaces, floors, area, rooms, bathrooms and rent amount. 
+
+
+```{r}
+par(mfrow=c(3,3))
+a <- density(df$area)
+r<- density(df$rooms)
+b <- density(df$bathroom)
+f <- density(df$floor)
+ra <- density(df$`rent amount`)
+ps<- density(df$`parking spaces`)
+
+plot(a, main = "Area density plot")
+plot(r, main = "Rooms density plot")
+plot(b, main = "Bathrooms denisty plot")
+plot(f, main = "Floor density plot")
+plot(ra, main = "Rent amount denisty plot")
+plot(ps, main = "Parking Spaces density plot")
+
+
+```
+
+
+From the density plots, it is obvious that some of the features are skewed right. This may present an issue as an assumption of regression is that the features are normally distributed. However, there are over 30 observations so the central limit theorem does apply. A log transformation is not a bad idea. I will move along without this step. 
+
+Personally, I am most interested in the relationship that area and price have. If it is linear or if it is polynomic in its relation I do not know. A scatterplot will help decipher this question. 
+
+```{r}
+plot(df$area,df$`rent amount`)
+
+
+
+```
+
+Due two two outliers, we cannot obtain the information we wanted. To fix this, we will limit the x-axis to less than 5000 square feet. 
+
+```{r}
+library(ggplot2)
+
+ggplot(df, aes(area, `rent amount`)) + 
+  geom_point() + 
+  geom_smooth() +
+  xlim(0,1000) +
+  ylab("Rent Amount")+
+  xlab("Square footage") +
+  ggtitle("Scatter Plot: Area vs Rent Amount")+
+  theme_bw()
+
+
+```
+
+
+
+The scatter plot shows conflicting information. From 0 to 300 square feet, the relationship is approximately linear yet form 0 to 1000 the relation looks polynomic. We will stick with linear regression and ANN for now. Further analysis on this data set with a polynomic regression would be appropriate. 
+
+
+
+### Multiple linear regression. 
+
+First we will split the data set randomly into a test and train set. 
+
+```{r}
+library(caTools)
+set.seed(123)
+split = sample.split(df$`rent amount`, SplitRatio = 0.8)
+training_set = subset(df, split == TRUE)
+test_set = subset(df, split == FALSE)
+```
+
+We have succesfully split the dataset. Now it is time to use the training set to create our regression.
+
+```{r}
+MLRmodel <- lm(`rent amount`~., df)
+```
+
+We have exectued our model. Let's examine the summary.
+
+```{r}
+summary(MLRmodel)
+
+```
+
+Not bad! An addjusted R-squared value of .49 shows that the features we have explain about 50% of rent amounts in brazil. The features rooms and animals have p-values of .1831 and .2428, respectively. This implies that they are not significant in explaining rent amounts. Although they do not individually have an impact, removing them may inject omitted variable bias into our model. This would be a worse outcome than leaving them in. If we reexamine the correlogram, we notice that multicolinearity may be an issue between rooms, parking spots, and bathrooms. Let's remove rooms and reexamine the model.
+
+
+```{r}
+
+df_norooms <- df[,-3]
+MLRmodel2 <- lm(`rent amount`~ ., df_norooms )
+summary(MLRmodel2)
+```
+The model is relatively the same. We will disregard and use the first. 
+
+Now, let us use the model to predict the rent amounts on the test data. 
+
+```{r}
+predictions <- predict.lm(MLRmodel, test_set[,-9])
+results <- cbind.data.frame(predictions, test_set[,9])
+plot(results$predictions, results$`rent amount`)
+```
+
+Now we need a metric to judge our predictions on. In this case I will use RSME which stands for residual mean squared error. 
+
+```{r}
+sqrt(mean(predictions - results$`rent amount`)**2)
+
+```
+
+
+
+
+
+
+
+
